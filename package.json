@@ -1,7 +1,9 @@
 {
-  "name": "mindlink-nango",
+  "name": "mindlink-nango-backend",
+  "private": true,
   "type": "module",
   "dependencies": {
-    "@nangohq/node": "latest"
+    "@nangohq/node": "^0.29.0"
   }
 }
+
