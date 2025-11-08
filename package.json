@@ -1,0 +1,7 @@
+{
+  "name": "mindlink-nango",
+  "type": "module",
+  "dependencies": {
+    "@nangohq/node": "latest"
+  }
+}
