@@ -1,43 +1,50 @@
 import { Nango } from '@nangohq/node';
 
-const nango = new Nango({
-  secretKey: process.env.NANGO_SECRET_KEY!,
-  host: process.env.NANGO_HOST || undefined // ne mets rien si Nango Cloud
-});
-
-// petit helper CORS
-function setCors(res: any) {
-  res.setHeader('Access-Control-Allow-Origin', '*'); // remplace par ton domaine Framer si tu veux restreindre
+export default async function handler(req: any, res: any) {
+  // CORS basique
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-}
-
-export default async function handler(req: any, res: any) {
-  setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { endUserId, email, displayName, tags } = req.body || {};
-    const allowed_integrations = ['hubspot']; // mets ici tes slugs Nango exacts (ex: 'hubspot', 'google-mail', etc.)
+    // 1) Vérifier l'env
+    const secret = process.env.NANGO_SECRET_KEY;
+    if (!secret) {
+      console.error('Missing NANGO_SECRET_KEY');
+      return res.status(500).json({ error: 'MISSING_ENV_NANGO_SECRET_KEY' });
+    }
 
+    // 2) Parser le body de façon safe (Vercel peut passer req.body en string)
+    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+    const { endUserId, email, displayName, tags } = body;
+
+    // 3) Construire Nango
+    const nango = new Nango({
+      secretKey: secret,
+      host: process.env.NANGO_HOST || undefined
+    });
+
+    // 4) Appel Nango (sans filtre d’intégrations pour éviter les slugs invalides)
     const session = await nango.createConnectSession({
       end_user: {
         id: String(endUserId || 'ML000001'),
         email,
         display_name: displayName,
         tags: tags || { project: 'mindlink' }
-      },
-      allowed_integrations
+      }
     });
 
-    // Certaines versions renvoient { token }, d'autres { data: { token } }
     const token = (session as any)?.token ?? (session as any)?.data?.token;
-    if (!token) throw new Error('No token returned by Nango');
+    if (!token) {
+      console.error('No token returned by Nango:', session);
+      return res.status(500).json({ error: 'NANGO_NO_TOKEN' });
+    }
 
     return res.status(200).json({ sessionToken: token, endUserId: String(endUserId || 'ML000001') });
   } catch (err: any) {
-    console.error('Nango session token error:', err?.response?.data || err?.message || err);
+    console.error('SESSION_TOKEN_ERROR:', err?.response?.data || err?.message || err);
     return res.status(500).json({ error: 'SESSION_TOKEN_ERROR' });
   }
 }
