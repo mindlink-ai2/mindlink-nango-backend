@@ -1,14 +1,8 @@
 // api/connect.js
-// Redirige automatiquement vers le flow OAuth Nango pour le provider indiqué.
-//
-// Usage :
-//   /api/connect?provider=hubspot&endUserId=u123
-//   /api/connect?provider=google-mail-gzeg&endUserId=u123   <-- ⚠️ TON provider
-//   /api/connect?provider=linkedin&endUserId=u123
-//   /api/connect?endUserId=u123           (ouvre le picker Nango si pas de provider)
+import { Nango } from '@nangohq/node';
 
 export default async function handler(req, res) {
-  // CORS (si appelé en XHR)
+  // CORS / méthodes
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -17,57 +11,44 @@ export default async function handler(req, res) {
 
   try {
     const secret = process.env.NANGO_SECRET_KEY;
-    if (!secret) return res.status(500).json({ error: 'MISSING_ENV_NANGO_SECRET_KEY' });
+    if (!secret) return res.status(500).send('<pre>MISSING_ENV_NANGO_SECRET_KEY</pre>');
 
+    const host = process.env.NANGO_HOST || 'https://api.nango.dev';
     const endUserId = String(req.query.endUserId || 'ML000001');
-    const host      = process.env.NANGO_HOST || 'https://api.nango.dev';
 
-    // ---- Provider (on force ton provider custom si "google-mail" est passé par erreur)
+    // Provider passé en query (on force ton provider custom si quelqu’un met "google-mail")
     const rawProvider = (req.query.provider || '').toString().trim();
+    const forcedGoogle = process.env.NANGO_GOOGLE_PROVIDER || 'google-mail-gzeg';
+    const provider =
+      rawProvider === 'google-mail' || rawProvider === 'gmail'
+        ? forcedGoogle
+        : rawProvider;
 
-    // Map d’alias => évite d’appeler par erreur l’app Google de Nango
-    const providerAliasMap = {
-      'google-mail': process.env.NANGO_GOOGLE_PROVIDER || 'google-mail-gzeg',
-      'gmail':       process.env.NANGO_GOOGLE_PROVIDER || 'google-mail-gzeg',
-    };
-    const provider = providerAliasMap[rawProvider] || rawProvider;
+    const nango = new Nango({ secretKey: secret, host });
 
-    // Payload pour la session Nango
-    const payload = { end_user: { id: endUserId } };
-    // Si provider fourni => on restreint à CETTE intégration (sinon picker)
-    if (provider) payload.allowed_integrations = [provider];
-
-    const resp = await fetch(`${host}/connect/sessions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${secret}`,
-      },
-      body: JSON.stringify(payload),
+    // Crée une session Connect
+    const session = await nango.createConnectSession({
+      end_user: { id: endUserId },
+      ...(provider ? { allowed_integrations: [provider] } : {}) // sans provider => picker
     });
 
-    // Gestion d’erreurs lisibles
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      return res
-        .status(resp.status)
-        .send(`<pre style="font-family:system-ui,monospace">NANGO ERROR\n\n${JSON.stringify(data, null, 2)}</pre>`);
+    const { connect_url, token } = session.data || {};
+
+    // 1) Utilise le lien officiel si dispo
+    if (connect_url) {
+      return res.redirect(302, connect_url);
     }
 
-    const token = data?.token || data?.data?.token;
-    if (!token) {
-      return res
-        .status(502)
-        .send(`<pre style="font-family:system-ui,monospace">NANGO ERROR\n\n${JSON.stringify(data, null, 2)}</pre>`);
+    // 2) Sinon, retombe proprement sur app.nango.dev/connect
+    if (token) {
+      const url = `https://app.nango.dev/connect?session_token=${encodeURIComponent(token)}`;
+      return res.redirect(302, url);
     }
 
-    // URL de connexion (préférence pour app.nango.dev; fallback si Nango renvoie un lien direct)
-    const connectLink =
-      data?.connect_link || `https://app.nango.dev/connect?session_token=${encodeURIComponent(token)}`;
-
-    // Redirection 302 vers la Connect UI (qui enchaîne vers Google OAuth)
-    res.writeHead(302, { Location: connectLink });
-    return res.end();
+    // 3) Debug lisible si rien
+    return res
+      .status(502)
+      .send(`<pre style="font-family:system-ui,monospace">NANGO ERROR\n\n${JSON.stringify(session, null, 2)}</pre>`);
   } catch (e) {
     return res
       .status(500)
