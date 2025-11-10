@@ -1,56 +1,65 @@
-// pages/api/connect.js
+// api/connect.js
 export default async function handler(req, res) {
   // CORS + no-cache
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
-  const secret = process.env.NANGO_SECRET_KEY;
-  if (!secret) return res.status(500).send('Missing env NANGO_SECRET_KEY');
+  try {
+    const secret = process.env.NANGO_SECRET_KEY;
+    if (!secret) return res.status(500).json({ error: 'Missing env NANGO_SECRET_KEY' });
 
-  const integrationId = (req.query.provider || '').toString().trim();     // ex: "google-mail-gzeg" | "hubspot"
-  const endUserId     = (req.query.endUserId || req.query.end_user || '').toString().trim();
-  if (!integrationId) return res.status(400).send('Missing provider/integration_id');
-  if (!endUserId)     return res.status(400).send('Missing endUserId');
+    // ⚠️ Ne pas compter sur req.query : on parse l’URL nous-mêmes
+    const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-  const url = 'https://api.nango.dev/v1/connect/sessions';
+    const integrationId =
+      (urlObj.searchParams.get('provider') || urlObj.searchParams.get('integration_id') || '').trim(); // ex: "google-mail-gzeg" | "hubspot"
+    const endUserId =
+      (urlObj.searchParams.get('endUserId') || urlObj.searchParams.get('end_user') || '').trim();      // ex: "{user.id}"
 
-const r = await fetch(url, {
-  method: 'POST',
-  headers: {
-    Authorization: `Bearer ${secret}`,
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-    // 👇 Nango v1 attend ces 2 headers :
-    'provider-config-key': integrationId,                // ex: "google-mail-gzeg" ou "hubspot"
-    'connection-id': `${integrationId}-${endUserId}`     // identifiant de ta future connexion
-  },
-  body: JSON.stringify({
-    end_user: { id: endUserId }                          // end_user doit être un objet { id }
-  })
-});
+    if (!integrationId) return res.status(400).json({ error: 'Missing provider/integration_id' });
+    if (!endUserId)     return res.status(400).json({ error: 'Missing endUserId' });
 
+    // --- Appel Nango v1: headers requis + end_user objet ---
+    const called = 'https://api.nango.dev/v1/connect/sessions';
+    const r = await fetch(called, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'provider-config-key': integrationId,               // requis par Nango v1
+        'connection-id': `${integrationId}-${endUserId}`   // id de connexion côté Nango
+      },
+      body: JSON.stringify({
+        end_user: { id: endUserId }                         // end_user doit être un objet
+        // success_url: 'https://mind-link.fr/connected',   // optionnel
+        // failure_url: 'https://mind-link.fr/connexion-erreur'
+      })
+    });
+
+    const raw = await r.text();
+    let data; try { data = JSON.parse(raw); } catch {}
 
     if (!r.ok) {
-      // renvoie l’erreur brute + l’endpoint appelé pour diagnostic
-      return res
-        .status(r.status || 500)
-        .send(JSON.stringify({ called: url, status: r.status, raw }, null, 2));
+      // On renvoie l’erreur brute pour debug (évite un 500 “crash”)
+      return res.status(r.status || 500).json({ called, status: r.status, raw });
     }
 
-    const connectLink = data?.data?.connect_link || data?.connect_link;
-    if (!connectLink) {
-      return res
-        .status(500)
-        .send(JSON.stringify({ called: url, error: 'Missing connect_link', raw: data || raw }, null, 2));
+    const link = data?.data?.connect_link || data?.connect_link;
+    if (!link) {
+      return res.status(500).json({ called, error: 'Missing connect_link', raw: data || raw });
     }
 
-    res.writeHead(307, { Location: connectLink });
+    // Redirection 307 vers l’écran de consentement (Gmail/HubSpot)
+    res.writeHead(307, { Location: link });
     return res.end();
   } catch (e) {
-    return res.status(500).send(JSON.stringify({ called: url, error: e?.message || String(e) }, null, 2));
+    // Jamais de throw non-catché : on renvoie l’erreur lisible
+    return res.status(500).json({ error: 'Server error', detail: e?.message || String(e) });
   }
 }
