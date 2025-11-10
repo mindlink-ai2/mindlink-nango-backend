@@ -2,7 +2,7 @@
 // GET /api/connect?endUserId=CLIENT_ID
 // GET /api/connect?provider=hubspot-ml&endUserId=CLIENT_ID
 // GET /api/connect?provider=google-mail-gzeg&endUserId=CLIENT_ID&returnUrl=https://mind-link.fr/connected
-// GET /api/connect?debug=1&...  -> ne redirige pas, renvoie l'URL construite (pour tester)
+// GET /api/connect?debug=1&... -> ne redirige pas, renvoie l’URL construite
 
 export default async function handler(req, res) {
   // CORS basique
@@ -14,12 +14,15 @@ export default async function handler(req, res) {
 
   try {
     const secret = process.env.NANGO_SECRET_KEY;
+    const publicKey = process.env.NANGO_PUBLIC_KEY;
     if (!secret) return res.status(500).send('Missing env NANGO_SECRET_KEY');
+    if (!publicKey) return res.status(500).send('Missing env NANGO_PUBLIC_KEY');
 
-    // IMPORTANT : utilise toujours l’API, pas l’app
-    const host = process.env.NANGO_HOST || 'https://api.nango.dev';
+    // API vs App hosts
+    const apiHost = process.env.NANGO_API_HOST || 'https://api.nango.dev';
+    const appHost = process.env.NANGO_APP_HOST || 'https://app.nango.dev';
 
-    // ⚠️ Mets le provider Gmail par défaut si tu veux que /api/connect?endUserId=... ouvre Gmail
+    // Provider par défaut si non fourni
     const DEFAULT_PROVIDER = process.env.NANGO_DEFAULT_PROVIDER || 'google-mail-gzeg';
 
     const provider  = (req.query.provider || DEFAULT_PROVIDER).toString().trim();
@@ -31,12 +34,16 @@ export default async function handler(req, res) {
       return res.status(400).send('Missing endUserId (ex: /api/connect?endUserId=client_123)');
     }
 
-    // 1) Upsert l’utilisateur (idempotent)
+    // 1) Upsert user chez Nango (idempotent)
     const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` };
-    const createUserResp = await fetch(`${host}/v1/users`, {
+    const createUserResp = await fetch(`${apiHost}/v1/users`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ id: endUserId })
+      // ⬇️ clé correcte : internal_id
+      body: JSON.stringify({
+        internal_id: endUserId,
+        metadata: { source: 'mindlink' }
+      })
     });
 
     if (!createUserResp.ok) {
@@ -44,15 +51,20 @@ export default async function handler(req, res) {
       return res.status(502).send(`Nango /v1/users failed: ${txt}`);
     }
 
-    // 2) Construire l’URL d’OAuth DIRECTE (pas de picker)
-    const url = new URL(`${host}/oauth/connect`);
-    url.searchParams.set('provider_config_key', provider);              // ex: google-mail-gzeg | hubspot-ml
-    url.searchParams.set('end_user', endUserId);                        // DOIT exister chez Nango
-    url.searchParams.set('connection_id', `${provider}-${endUserId}`);  // pratique pour retrouver la connexion
+    // 2) URL Hosted Connect (front de Nango)
+    // - avec provider => écran d’auth direct
+    // - sans provider => picker d’intégrations
+    const base = provider
+      ? `${appHost}/oauth/connect`
+      : `${appHost}/oauth/choose-integration`;
+
+    const url = new URL(base);
+    url.searchParams.set('public_key', publicKey);
+    url.searchParams.set('end_user', endUserId);
+    if (provider) url.searchParams.set('provider_config_key', provider);
     if (returnUrl) url.searchParams.set('return_url', returnUrl);
 
     if (debug) {
-      // mode test : ne redirige pas, montre ce qui va être appelé
       return res.status(200).json({
         providerUsed: provider,
         endUserId,
@@ -60,7 +72,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Redirection 302 vers le consent screen du provider
+    // 3) Redirection 302 vers l’écran de consentement
     res.writeHead(302, { Location: url.toString() });
     return res.end();
 
