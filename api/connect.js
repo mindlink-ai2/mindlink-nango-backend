@@ -17,22 +17,22 @@ export default async function handler(req, res) {
   if (!endUserId)     return res.status(400).send('Missing endUserId');
 
   const url = 'https://api.nango.dev/v1/connect/sessions';
-  try {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
-      body: JSON.stringify({
-        integration_id: integrationId,
-        end_user: { id: endUserId }
-      })
-    });
 
-    const raw = await r.text();
-    let data; try { data = JSON.parse(raw); } catch {}
+const r = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${secret}`,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    // 👇 Nango v1 attend ces 2 headers :
+    'provider-config-key': integrationId,                // ex: "google-mail-gzeg" ou "hubspot"
+    'connection-id': `${integrationId}-${endUserId}`     // identifiant de ta future connexion
+  },
+  body: JSON.stringify({
+    end_user: { id: endUserId }                          // end_user doit être un objet { id }
+  })
+});
+
 
     if (!r.ok) {
       // renvoie l’erreur brute + l’endpoint appelé pour diagnostic
