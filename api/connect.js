@@ -13,18 +13,18 @@ export default async function handler(req, res) {
     const secret = process.env.NANGO_SECRET_KEY;
     if (!secret) return res.status(500).json({ error: 'Missing env NANGO_SECRET_KEY' });
 
-    // ⚠️ Ne pas compter sur req.query : on parse l’URL nous-mêmes
+    // parse URL correctement
     const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
     const integrationId =
-      (urlObj.searchParams.get('provider') || urlObj.searchParams.get('integration_id') || '').trim(); // ex: "google-mail-gzeg" | "hubspot"
+      (urlObj.searchParams.get('provider') || urlObj.searchParams.get('integration_id') || '').trim();
     const endUserId =
-      (urlObj.searchParams.get('endUserId') || urlObj.searchParams.get('end_user') || '').trim();      // ex: "{user.id}"
+      (urlObj.searchParams.get('endUserId') || urlObj.searchParams.get('end_user') || '').trim();
 
     if (!integrationId) return res.status(400).json({ error: 'Missing provider/integration_id' });
     if (!endUserId)     return res.status(400).json({ error: 'Missing endUserId' });
 
-    // --- Appel Nango v1: headers requis + end_user objet ---
+    // --- Appel Nango v1 ---
     const called = 'https://api.nango.dev/v1/connect/sessions';
     const r = await fetch(called, {
       method: 'POST',
@@ -32,13 +32,10 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${secret}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        'provider-config-key': integrationId,               // requis par Nango v1
-        'connection-id': `${integrationId}-${endUserId}`   // id de connexion côté Nango
+        'provider-config-key': integrationId // ✅ seul header à passer !
       },
       body: JSON.stringify({
-        end_user: { id: endUserId }                         // end_user doit être un objet
-        // success_url: 'https://mind-link.fr/connected',   // optionnel
-        // failure_url: 'https://mind-link.fr/connexion-erreur'
+        end_user: { id: endUserId }
       })
     });
 
@@ -46,7 +43,6 @@ export default async function handler(req, res) {
     let data; try { data = JSON.parse(raw); } catch {}
 
     if (!r.ok) {
-      // On renvoie l’erreur brute pour debug (évite un 500 “crash”)
       return res.status(r.status || 500).json({ called, status: r.status, raw });
     }
 
@@ -55,11 +51,10 @@ export default async function handler(req, res) {
       return res.status(500).json({ called, error: 'Missing connect_link', raw: data || raw });
     }
 
-    // Redirection 307 vers l’écran de consentement (Gmail/HubSpot)
     res.writeHead(307, { Location: link });
     return res.end();
+
   } catch (e) {
-    // Jamais de throw non-catché : on renvoie l’erreur lisible
     return res.status(500).json({ error: 'Server error', detail: e?.message || String(e) });
   }
 }
