@@ -11,61 +11,33 @@ export default async function handler(req, res) {
   const secret = process.env.NANGO_SECRET_KEY;
   if (!secret) return res.status(500).send('Missing env NANGO_SECRET_KEY');
 
-  const provider  = (req.query.provider || process.env.NANGO_DEFAULT_PROVIDER || '').toString().trim();
-  const debug     = req.query.debug === '1' || req.query.debug === 'diag' || req.query.debug === 'deep';
-  const endUserId = `ML_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-  const returnUrl = req.query.returnUrl?.toString().trim() || 'https://mind-link.fr/connected';
+  const provider  = (req.query.provider || '').toString().trim();             // "hubspot" | "google-mail-gzeg"
+  const endUserId = (req.query.endUserId || req.query.end_user || '').toString().trim(); // "{user.id}"
+  const debug     = ['1','diag','deep'].includes((req.query.debug || '').toString());
 
-  if (!provider) return res.status(400).send('Missing provider (or set NANGO_DEFAULT_PROVIDER)');
+  if (!provider)  return res.status(400).send('Missing provider');
+  if (!endUserId) return res.status(400).send('Missing endUserId');
 
   try {
-    // 0) Check integration exists in this environment
-    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` };
-    const integResp = await fetch(`https://api.nango.dev/v1/integrations/${encodeURIComponent(provider)}`, { headers });
-    const integTxt  = await integResp.text();
-
-    // 1) Upsert user (idempotent)
-    const upsertResp = await fetch('https://api.nango.dev/v1/users', {
+    const r = await fetch('https://api.nango.dev/connect/sessions', {
       method: 'POST',
-      headers,
-      body: JSON.stringify({ internal_id: endUserId })
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        end_user: endUserId,
+        provider_config_key: provider
+      })
     });
-    const upsertTxt = await upsertResp.text();
 
-    // 2) Build OAuth URL (API flow)
-    const oauthUrl = new URL('https://api.nango.dev/oauth/connect');
-    oauthUrl.searchParams.set('provider_config_key', provider);
-    oauthUrl.searchParams.set('end_user', endUserId);
-    oauthUrl.searchParams.set('connection_id', `${provider}-${endUserId}`);
-    oauthUrl.searchParams.set('return_url', returnUrl);
+    const raw = await r.text();
+    let data; try { data = JSON.parse(raw); } catch {}
+    if (!r.ok) return res.status(debug ? r.status : 500).send(debug ? (raw || 'Nango connect session error') : `Nango session error (${r.status})`);
 
-    // 3) If debug, **don’t** redirect: expose diagnostics + the Location Nango would return
-    if (debug) {
-      // try preflight to read Location without following
-      let locationHeader = null;
-      try {
-        const pre = await fetch(oauthUrl, { redirect: 'manual' });
-        locationHeader = pre.headers.get('location');
-      } catch (e) {
-        // ignore
-      }
+    const link = data?.data?.connect_link || data?.connect_link;
+    if (!link) return res.status(500).send(debug ? JSON.stringify(data || raw) : 'Missing connect_link');
 
-      return res.status(200).json({
-        provider_used: provider,
-        env_secret_prefix: secret.slice(0, 6), // sk_dev_ / sk_live_ visible
-        integration_check: { ok: integResp.ok, status: integResp.status, body: integTxt?.slice(0, 4000) },
-        user_upsert: { ok: upsertResp.ok, status: upsertResp.status, body: upsertTxt?.slice(0, 1000) },
-        oauth_connect_url: oauthUrl.toString(),
-        nango_redirect_location: locationHeader, // <== si ça pointe vers app.nango.dev/dev/... on le voit ici
-      });
-    }
-
-    // 4) Normal redirect (consent)
-    res.writeHead(307, { Location: oauthUrl.toString() });
+    res.writeHead(307, { Location: link });
     return res.end();
-
-  } catch (err) {
-    console.error('CONNECT_ERROR:', err);
-    return res.status(500).send(`CONNECT_ERROR: ${err?.message || err}`);
+  } catch (e) {
+    return res.status(500).send(debug ? (e?.stack || String(e)) : 'Server error');
   }
 }
