@@ -11,9 +11,8 @@ export default async function handler(req, res) {
   const secret = process.env.NANGO_SECRET_KEY;
   if (!secret) return res.status(500).send('Missing env NANGO_SECRET_KEY');
 
-  const provider  = (req.query.provider || '').toString().trim();             // "hubspot" | "google-mail-gzeg"
-  const endUserId = (req.query.endUserId || req.query.end_user || '').toString().trim(); // "{user.id}"
-  const debug     = ['1','diag','deep'].includes((req.query.debug || '').toString());
+  const provider  = (req.query.provider || '').toString().trim();             // ex: "hubspot" | "google-mail-gzeg"
+  const endUserId = (req.query.endUserId || req.query.end_user || '').toString().trim(); // ex: "{user.id}"
 
   if (!provider)  return res.status(400).send('Missing provider');
   if (!endUserId) return res.status(400).send('Missing endUserId');
@@ -21,23 +20,34 @@ export default async function handler(req, res) {
   try {
     const r = await fetch('https://api.nango.dev/connect/sessions', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({
         end_user: endUserId,
         provider_config_key: provider
       })
     });
 
-    const raw = await r.text();
+    const raw = await r.text(); // récupère toujours le corps
+    // Essaie de parser, sinon garde le texte
     let data; try { data = JSON.parse(raw); } catch {}
-    if (!r.ok) return res.status(debug ? r.status : 500).send(debug ? (raw || 'Nango connect session error') : `Nango session error (${r.status})`);
+
+    if (!r.ok) {
+      // >>> Important: renvoyer l'erreur brute pour diagnostiquer
+      return res.status(r.status || 500).send(raw || `Nango connect session error (${r.status})`);
+    }
 
     const link = data?.data?.connect_link || data?.connect_link;
-    if (!link) return res.status(500).send(debug ? JSON.stringify(data || raw) : 'Missing connect_link');
+    if (!link) {
+      return res.status(500).send(`Missing connect_link. Raw: ${raw}`);
+    }
 
     res.writeHead(307, { Location: link });
     return res.end();
   } catch (e) {
-    return res.status(500).send(debug ? (e?.stack || String(e)) : 'Server error');
+    return res.status(500).send(`Server error: ${e?.message || String(e)}`);
   }
 }
