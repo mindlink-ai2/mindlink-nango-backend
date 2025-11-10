@@ -11,16 +11,14 @@ export default async function handler(req, res) {
   const secret = process.env.NANGO_SECRET_KEY;
   if (!secret) return res.status(500).send('Missing env NANGO_SECRET_KEY');
 
-  // params venant du bouton Framer
-  const integrationId = (req.query.provider || '').toString().trim(); // ex: "google-mail-gzeg" ou "hubspot"
-  const endUserId     = (req.query.endUserId || req.query.end_user || '').toString().trim(); // ex: "{user.id}"
-
+  const integrationId = (req.query.provider || '').toString().trim();     // ex: "google-mail-gzeg" | "hubspot"
+  const endUserId     = (req.query.endUserId || req.query.end_user || '').toString().trim();
   if (!integrationId) return res.status(400).send('Missing provider/integration_id');
   if (!endUserId)     return res.status(400).send('Missing endUserId');
 
+  const url = 'https://api.nango.dev/v1/connect/sessions';
   try {
-    // IMPORTANT: endpoint v1 + schéma: { integration_id, end_user: { id } }
-    const r = await fetch('https://api.nango.dev/v1/connect/sessions', {
+    const r = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${secret}`,
@@ -30,9 +28,6 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         integration_id: integrationId,
         end_user: { id: endUserId }
-        // Optionnel:
-        // success_url: 'https://mind-link.fr/connected',
-        // failure_url: 'https://mind-link.fr/connexion-erreur'
       })
     });
 
@@ -40,19 +35,22 @@ export default async function handler(req, res) {
     let data; try { data = JSON.parse(raw); } catch {}
 
     if (!r.ok) {
-      // renvoyer l'erreur brute pour debug immédiat
-      return res.status(r.status || 500).send(raw || `Nango connect session error (${r.status})`);
+      // renvoie l’erreur brute + l’endpoint appelé pour diagnostic
+      return res
+        .status(r.status || 500)
+        .send(JSON.stringify({ called: url, status: r.status, raw }, null, 2));
     }
 
     const connectLink = data?.data?.connect_link || data?.connect_link;
     if (!connectLink) {
-      return res.status(500).send(`Missing connect_link. Raw: ${raw}`);
+      return res
+        .status(500)
+        .send(JSON.stringify({ called: url, error: 'Missing connect_link', raw: data || raw }, null, 2));
     }
 
-    // redirection vers l'écran de consentement du provider (HubSpot/Gmail)
     res.writeHead(307, { Location: connectLink });
     return res.end();
   } catch (e) {
-    return res.status(500).send(`Server error: ${e?.message || String(e)}`);
+    return res.status(500).send(JSON.stringify({ called: url, error: e?.message || String(e) }, null, 2));
   }
 }
