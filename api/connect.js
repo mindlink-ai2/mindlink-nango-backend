@@ -1,6 +1,16 @@
-// api/connect.js
+// /api/connect.js
+// Redirige vers la page d’acceptation Nango (consent UI) pour l’intégration demandée.
+// Usage :
+//   /api/connect?provider=hubspot&endUserId=USER_123
+//   /api/connect?provider=google-mail&endUserId=USER_123
+//   /api/connect?endUserId=USER_123            (ouvre le picker Nango si aucun provider)
+//
+// ENV requis :
+//   - NANGO_SECRET_KEY   (clé secrète d’environnement Nango)
+//   - NANGO_API_BASE     (optionnel, défaut: https://api.nango.dev)
+
 export default async function handler(req, res) {
-  // CORS + no-cache
+  // CORS + no-cache (utile si tu déclenches en XHR depuis Framer)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -10,51 +20,71 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    const secret = process.env.NANGO_SECRET_KEY;
-    if (!secret) return res.status(500).json({ error: 'Missing env NANGO_SECRET_KEY' });
+    const NANGO_SECRET_KEY = process.env.NANGO_SECRET_KEY;
+    if (!NANGO_SECRET_KEY) {
+      return res.status(500).json({ error: 'Missing env NANGO_SECRET_KEY' });
+    }
+    const NANGO_API_BASE = process.env.NANGO_API_BASE || 'https://api.nango.dev';
 
-    // parse URL correctement
-    const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    // ⚠️ On parse l’URL nous-mêmes pour être 100% compatibles (Vercel / Node)
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const provider = (url.searchParams.get('provider') || '').trim();  // ex: 'hubspot' ou 'google-mail' ou ton providerConfigKey custom
+    const endUserId = (url.searchParams.get('endUserId') || url.searchParams.get('end_user_id') || '').trim();
 
-    const integrationId =
-      (urlObj.searchParams.get('provider') || urlObj.searchParams.get('integration_id') || '').trim();
-    const endUserId =
-      (urlObj.searchParams.get('endUserId') || urlObj.searchParams.get('end_user') || '').trim();
+    // Optionnels (si tu veux personnaliser l’UI ou tes webhooks côté Nango)
+    const endUserEmail = (url.searchParams.get('email') || '').trim();
+    const endUserName  = (url.searchParams.get('name') || '').trim();
 
-    if (!integrationId) return res.status(400).json({ error: 'Missing provider/integration_id' });
-    if (!endUserId)     return res.status(400).json({ error: 'Missing endUserId' });
+    if (!endUserId) {
+      return res.status(400).json({ error: 'Missing endUserId' });
+    }
 
-    // --- Appel Nango v1 ---
-    const called = 'https://api.nango.dev/v1/connect/sessions';
-    const r = await fetch(called, {
+    // Corps de la création de session
+    const body = {
+      end_user: {
+        id: endUserId,
+        ...(endUserEmail ? { email: endUserEmail } : {}),
+        ...(endUserName ? { display_name: endUserName } : {}),
+      }
+    };
+
+    // Si un provider est spécifié, on restreint la session à cette intégration → l’UI saute direct sur la bonne page
+    // (sinon, Nango affiche le picker)
+    if (provider) {
+      body.allowed_integrations = [provider];
+    }
+
+    // Appel Nango: POST /connect/sessions → { data: { token, connect_link, expires_at } }
+    const resp = await fetch(`${NANGO_API_BASE}/connect/sessions`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'provider-config-key': integrationId // ✅ seul header à passer !
+        'Authorization': `Bearer ${NANGO_SECRET_KEY}`,
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        end_user: { id: endUserId }
-      })
+      body: JSON.stringify(body)
     });
 
-    const raw = await r.text();
-    let data; try { data = JSON.parse(raw); } catch {}
-
-    if (!r.ok) {
-      return res.status(r.status || 500).json({ called, status: r.status, raw });
+    // Gestion d’erreur Nango lisible
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      return res.status(resp.status).json({
+        error: 'NANGO_CONNECT_SESSION_FAILED',
+        details: text || `HTTP ${resp.status}`
+      });
     }
 
-    const link = data?.data?.connect_link || data?.connect_link;
-    if (!link) {
-      return res.status(500).json({ called, error: 'Missing connect_link', raw: data || raw });
+    const json = await resp.json();
+    const connectLink = json?.data?.connect_link;
+
+    if (!connectLink) {
+      return res.status(502).json({ error: 'MISSING_CONNECT_LINK_IN_RESPONSE' });
     }
 
-    res.writeHead(307, { Location: link });
+    // ✅ Redirection 302 vers la page d’acceptation/consentement Nango
+    res.writeHead(302, { Location: connectLink });
     return res.end();
-
-  } catch (e) {
-    return res.status(500).json({ error: 'Server error', detail: e?.message || String(e) });
+  } catch (err) {
+    console.error('CONNECT_HANDLER_ERROR', err);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', details: String(err && err.message || err) });
   }
 }
