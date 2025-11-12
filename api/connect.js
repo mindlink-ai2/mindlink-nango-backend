@@ -3,8 +3,7 @@
 // Usage :
 //   /api/connect?provider=hubspot&endUserId=USER_123
 //   /api/connect?provider=google-mail&endUserId=USER_123
-//   /api/connect?config=google-mail-gzeg&endUserId=USER_123   (cibler une config précise)
-//   /api/connect?endUserId=USER_123                           (ouvre le picker Nango si aucun provider/config)
+//   /api/connect?endUserId=USER_123            (ouvre le picker Nango si aucun provider)
 //
 // ENV requis :
 //   - NANGO_SECRET_KEY   (clé secrète d’environnement Nango)
@@ -27,29 +26,18 @@ export default async function handler(req, res) {
     }
     const NANGO_API_BASE = process.env.NANGO_API_BASE || 'https://api.nango.dev';
 
-    // ⚠️ Parse URL côté serveur (compatible Vercel/Node)
+    // ⚠️ On parse l’URL nous-mêmes pour être 100% compatibles (Vercel / Node)
     const url = new URL(req.url, `http://${req.headers.host}`);
-
-    // Nettoyage agressif contre le bug "premier clic" (espaces, NBSP, retours)
-    const sanitize = (v) => (v || '').replace(/\s+/g, '').toLowerCase().trim();
-
-    // provider = slug d’intégration (ex: hubspot, google-mail, notion)
-    const providerRaw = url.searchParams.get('provider');
-    const provider = sanitize(providerRaw);
-
-    // config = providerConfigKey précis (ex: google-mail-gzeg) — facultatif
-    const configRaw = url.searchParams.get('config');
-    const config = sanitize(configRaw);
-
-    // endUserId (obligatoire)
+    const provider = (url.searchParams.get('provider') || '').trim();  // ex: 'hubspot' ou 'google-mail' ou ton providerConfigKey custom
     const endUserId = (url.searchParams.get('endUserId') || url.searchParams.get('end_user_id') || '').trim();
+
+    // Optionnels (si tu veux personnaliser l’UI ou tes webhooks côté Nango)
+    const endUserEmail = (url.searchParams.get('email') || '').trim();
+    const endUserName  = (url.searchParams.get('name') || '').trim();
+
     if (!endUserId) {
       return res.status(400).json({ error: 'Missing endUserId' });
     }
-
-    // Optionnels (email/nom pour UI Nango)
-    const endUserEmail = (url.searchParams.get('email') || '').trim();
-    const endUserName  = (url.searchParams.get('name') || '').trim();
 
     // Corps de la création de session
     const body = {
@@ -57,21 +45,16 @@ export default async function handler(req, res) {
         id: endUserId,
         ...(endUserEmail ? { email: endUserEmail } : {}),
         ...(endUserName ? { display_name: endUserName } : {}),
-      },
-      // Bonus: redirections explicites (tu peux changer les chemins)
-      success_redirect_url: `${url.origin}/connect/success`,
-      failure_redirect_url: `${url.origin}/connect/failure`,
+      }
     };
 
-    // Priorité à une CONFIG précise si fournie
-    if (config) {
-      body.allowed_connection_configs = [config];
-    } else if (provider) {
-      // Sinon, on restreint par INTEGRATION (slug). Si provider vide/erroné → on n’envoie rien et le picker s’affiche.
+    // Si un provider est spécifié, on restreint la session à cette intégration → l’UI saute direct sur la bonne page
+    // (sinon, Nango affiche le picker)
+    if (provider) {
       body.allowed_integrations = [provider];
     }
 
-    // Appel Nango: POST /connect/sessions
+    // Appel Nango: POST /connect/sessions → { data: { token, connect_link, expires_at } }
     const resp = await fetch(`${NANGO_API_BASE}/connect/sessions`, {
       method: 'POST',
       headers: {
@@ -81,34 +64,27 @@ export default async function handler(req, res) {
       body: JSON.stringify(body)
     });
 
-    const text = await resp.text().catch(() => '');
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch { /* body non-JSON côté erreur */ }
-
+    // Gestion d’erreur Nango lisible
     if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
       return res.status(resp.status).json({
         error: 'NANGO_CONNECT_SESSION_FAILED',
-        details: json || text || `HTTP ${resp.status}`
+        details: text || `HTTP ${resp.status}`
       });
     }
 
-    // Compatibilité connect_link / connect_url (selon version Nango)
-    const connectLink =
-      json?.data?.connect_link ||
-      json?.data?.connect_url ||
-      json?.connect_link ||
-      json?.connect_url;
+    const json = await resp.json();
+    const connectLink = json?.data?.connect_link;
 
     if (!connectLink) {
-      return res.status(502).json({ error: 'MISSING_CONNECT_LINK_IN_RESPONSE', details: json || text });
+      return res.status(502).json({ error: 'MISSING_CONNECT_LINK_IN_RESPONSE' });
     }
 
-    // ✅ Redirection 302 vers la page de consentement Nango
+    // ✅ Redirection 302 vers la page d’acceptation/consentement Nango
     res.writeHead(302, { Location: connectLink });
     return res.end();
-
   } catch (err) {
     console.error('CONNECT_HANDLER_ERROR', err);
-    return res.status(500).json({ error: 'INTERNAL_ERROR', details: String((err && err.message) || err) });
+    return res.status(500).json({ error: 'INTERNAL_ERROR', details: String(err && err.message || err) });
   }
 }
